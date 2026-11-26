@@ -1,116 +1,129 @@
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import type { GitHubUser, PullRequest } from "../lib/github.ts";
-import { pullHref } from "../lib/routes.ts";
-import { repoKey, type RepoConfig } from "../lib/settings.ts";
+import { useState, type ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  ChevronRightIcon,
+  EyeIcon,
+  GitPullRequestIcon,
+  PlayIcon,
+  PlusIcon,
+  RepoIcon,
+} from "@primer/octicons-react";
+import type { PrRow } from "../lib/gql.ts";
+import { href } from "../lib/routes.ts";
+import { repoKey } from "../lib/settings.ts";
+import { Link } from "../router.tsx";
 import { useServices } from "../services.tsx";
-import { PreviewButton } from "./PreviewButton.tsx";
-import { relativeTime } from "./time.ts";
+import { AppHeader, Avatar, ErrorBox, Skeleton } from "./components.tsx";
+import { PullRow } from "./PullRow.tsx";
+import { pullListQuery, useMyWork, useViewer } from "./queries.ts";
 
-const TAB_KEY = "home.tab";
-
-export function HomeScreen({ viewer }: { viewer: GitHubUser }) {
-  const { repos } = useServices();
-  const [tab, setTab] = useState(() => localStorage.getItem(TAB_KEY) ?? "");
-  const current = repos.find((r) => repoKey(r) === tab) ?? repos[0];
-  const [onlyMine, setOnlyMine] = useState(false);
-
-  function select(r: RepoConfig) {
-    localStorage.setItem(TAB_KEY, repoKey(r));
-    setTab(repoKey(r));
-  }
-
+export function HomeScreen() {
+  const viewer = useViewer();
+  const { repos, client } = useServices();
+  const qc = useQueryClient();
   return (
-    <main className="page">
-      <header className="topbar">
-        <h1>プルリクエスト</h1>
-        <a className="icon-btn" href="#/settings" aria-label="設定">
-          ⚙
-        </a>
-      </header>
-      {repos.length === 0 ? (
-        <p className="center muted">
-          リポジトリがありません。<a href="#/settings">設定</a>から追加してください。
-        </p>
+    <>
+      <AppHeader
+        back={false}
+        title="ホーム"
+        right={
+          viewer.data && (
+            <Link href="#/settings" className="header-btn" aria-label="設定">
+              <Avatar src={viewer.data.avatar_url} login={viewer.data.login} size={24} />
+            </Link>
+          )
+        }
+      />
+      <main className="page">
+        <MyWork login={viewer.data?.login} />
+
+        <h2 className="section-title">リポジトリ</h2>
+        <div className="box">
+          {repos.length === 0 && (
+            <div className="box-row fg-muted">まだありません。設定から追加してください。</div>
+          )}
+          {repos.map((r) => (
+            <div className="box-row repo-row" key={repoKey(r)}>
+              <RepoIcon size={16} className="fg-muted" />
+              <Link
+                className="grow min0 row-link"
+                href={href({ name: "pulls", owner: r.owner, repo: r.repo, state: "open", q: "" })}
+                onIntent={() => void qc.prefetchInfiniteQuery(pullListQuery(client, r.owner, r.repo, "open", ""))}
+              >
+                <span className="fg-muted">{r.owner} / </span>
+                <span className="text-bold">{r.repo}</span>
+              </Link>
+              <Link
+                className="btn btn-sm"
+                aria-label={`${r.repo} のPR`}
+                href={href({ name: "pulls", owner: r.owner, repo: r.repo, state: "open", q: "" })}
+              >
+                <GitPullRequestIcon size={14} />
+              </Link>
+              <Link className="btn btn-sm" aria-label={`${r.repo} のActions`} href={href({ name: "actions", owner: r.owner, repo: r.repo })}>
+                <PlayIcon size={14} />
+              </Link>
+            </div>
+          ))}
+          <Link className="box-row box-row-button fg-accent" href="#/settings">
+            <PlusIcon size={16} /> リポジトリを追加・設定
+          </Link>
+        </div>
+      </main>
+    </>
+  );
+}
+
+/** レビュー依頼と自分のPR（GitHubの「My work」） */
+export function MyWork({ login }: { login: string | undefined }) {
+  const q = useMyWork(login);
+  return (
+    <>
+      <h2 className="section-title">あなたの作業</h2>
+      {q.isPending ? (
+        <Skeleton rows={3} />
+      ) : q.isError ? (
+        <ErrorBox error={q.error} retry={() => q.refetch()} />
       ) : (
         <>
-          <nav className="tabs">
-            {repos.map((r) => (
-              <button
-                key={repoKey(r)}
-                className={`tab ${r === current ? "active" : ""}`}
-                onClick={() => select(r)}
-              >
-                {r.repo}
-              </button>
-            ))}
-          </nav>
-          <label className="toggle small">
-            <input type="checkbox" checked={onlyMine} onChange={(e) => setOnlyMine(e.target.checked)} />
-            自分に関係するものだけ
-          </label>
-          <PullList key={repoKey(current)} config={current} viewer={viewer} onlyMine={onlyMine} />
+          <WorkSection
+            title="レビュー依頼"
+            icon={<EyeIcon size={16} />}
+            rows={q.data.reviewRequested}
+            empty="レビュー依頼はありません"
+          />
+          <WorkSection
+            title="自分のPR"
+            icon={<GitPullRequestIcon size={16} />}
+            rows={q.data.mine}
+            empty="オープンなPRはありません"
+          />
         </>
       )}
-    </main>
+    </>
   );
 }
 
-export function isRelated(pr: PullRequest, login: string) {
+function WorkSection({ title, icon, rows, empty }: { title: string; icon: ReactNode; rows: PrRow[]; empty: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const shown = expanded ? rows : rows.slice(0, 5);
   return (
-    pr.user?.login === login ||
-    !!pr.assignees?.some((u) => u.login === login) ||
-    !!pr.requested_reviewers?.some((u) => u.login === login)
-  );
-}
-
-function PullList({ config, viewer, onlyMine }: { config: RepoConfig; viewer: GitHubUser; onlyMine: boolean }) {
-  const { client } = useServices();
-  const q = useQuery({
-    queryKey: ["pulls", config.owner, config.repo],
-    queryFn: () => client.listOpenPulls(config.owner, config.repo),
-  });
-
-  if (q.isPending) return <p className="center muted">読み込み中…</p>;
-  if (q.isError) {
-    return (
-      <div className="center">
-        <p className="error">{q.error.message}</p>
-        <button className="btn" onClick={() => q.refetch()}>
-          再試行
-        </button>
+    <div className="box">
+      <div className="box-header">
+        {icon}
+        <span className="text-bold">{title}</span>
+        <span className="counter">{rows.length}</span>
       </div>
-    );
-  }
-  const pulls = onlyMine ? q.data.filter((p) => isRelated(p, viewer.login)) : q.data;
-  if (pulls.length === 0) return <p className="center muted">オープンなPRはありません</p>;
-
-  return (
-    <ul className="list">
-      {pulls.map((pr) => (
-        <li key={pr.number} className="row">
-          <a className="row-main" href={pullHref(config.owner, config.repo, pr.number)}>
-            <span className="title">
-              {pr.draft && <span className="badge">Draft</span>}
-              {pr.title}
-            </span>
-            <span className="muted small">
-              #{pr.number} · {pr.user?.login ?? "?"} · {relativeTime(pr.updated_at)}更新
-              {isRelated(pr, viewer.login) && <span className="badge mine">自分</span>}
-            </span>
-          </a>
-          <PreviewButton
-            config={config.preview}
-            input={{
-              owner: config.owner,
-              repo: config.repo,
-              number: pr.number,
-              headSha: pr.head.sha,
-              headRef: pr.head.ref,
-            }}
-          />
-        </li>
-      ))}
-    </ul>
+      {rows.length === 0 ? (
+        <div className="box-row fg-muted small">{empty}</div>
+      ) : (
+        shown.map((pr) => <PullRow key={pr.id} pr={pr} showRepo />)
+      )}
+      {rows.length > 5 && (
+        <button className="box-row box-row-button fg-accent small" onClick={() => setExpanded(!expanded)}>
+          {expanded ? "たたむ" : `ほか ${rows.length - 5} 件`} <ChevronRightIcon size={14} />
+        </button>
+      )}
+    </div>
   );
 }

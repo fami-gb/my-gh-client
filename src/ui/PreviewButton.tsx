@@ -1,40 +1,51 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { BrowserIcon, LinkExternalIcon } from "@primer/octicons-react";
 import { resolvePreview, type PreviewInput, type PreviewTarget } from "../lib/preview.ts";
-import type { PreviewConfig } from "../lib/settings.ts";
+import { DEFAULT_PREVIEW, repoKey, type PreviewConfig } from "../lib/settings.ts";
 import { useServices } from "../services.tsx";
+import { RelTime, Sheet } from "./components.tsx";
 import { openExternal } from "./open.ts";
 
-export function usePreview(input: PreviewInput, config: PreviewConfig) {
+export function usePreviewConfig(owner: string, repo: string): PreviewConfig {
+  const { repos } = useServices();
+  return repos.find((r) => repoKey(r).toLowerCase() === `${owner}/${repo}`.toLowerCase())?.preview ?? DEFAULT_PREVIEW;
+}
+
+export function usePreview(input: PreviewInput, config: PreviewConfig, enabled = true) {
   const { client } = useServices();
   return useQuery({
     // head.sha が変われば別のキャッシュになる
     queryKey: ["preview", input.owner, input.repo, input.number, input.headSha, config],
     queryFn: () => resolvePreview(client, input, config),
     staleTime: 30_000,
+    enabled,
     // デプロイ中は20秒ごとに見直す
     refetchInterval: (q) => (q.state.data?.kind === "pending" ? 20_000 : false),
   });
 }
 
+/** PRのプレビューを開くボタン。compact は一覧の行用（見つからなければ何も出さない）。 */
 export function PreviewButton({
   input,
   config,
-  large = false,
+  compact = false,
+  enabled = true,
 }: {
   input: PreviewInput;
   config: PreviewConfig;
-  large?: boolean;
+  compact?: boolean;
+  enabled?: boolean;
 }) {
-  const q = usePreview(input, config);
+  const q = usePreview(input, config, enabled);
   const [choosing, setChoosing] = useState(false);
-  const cls = `btn preview ${large ? "large" : ""}`;
+  const size = compact ? "btn-sm" : "";
 
-  if (q.isPending) return <button className={`${cls} ghost`} disabled>確認中…</button>;
+  if (q.isPending) return compact ? null : <button className={`btn ${size}`} disabled>プレビュー確認中…</button>;
   if (q.isError) {
-    return (
-      <button className={`${cls} ghost`} onClick={() => q.refetch()} title={q.error.message}>
-        取得失敗・再試行
+    return compact ? null : (
+      <button className={`btn ${size}`} onClick={() => q.refetch()} title={q.error.message}>
+        プレビュー取得失敗・再試行
       </button>
     );
   }
@@ -44,17 +55,20 @@ export function PreviewButton({
   switch (s.kind) {
     case "ready": {
       const [first] = s.targets;
-      if (s.targets.length === 1) {
-        return (
-          <button className={`${cls} primary`} onClick={() => openExternal(first.url!)}>
-            プレビュー
-          </button>
-        );
-      }
+      const many = s.targets.length > 1;
       return (
         <>
-          <button className={`${cls} primary`} onClick={() => setChoosing(true)}>
-            プレビュー（{s.targets.length}）
+          <button
+            className={`btn btn-preview ${size}`}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (many) setChoosing(true);
+              else openExternal(first.url!);
+            }}
+          >
+            <BrowserIcon size={16} />
+            プレビュー{many ? `（${s.targets.length}）` : ""}
           </button>
           {choosing && <ChooseSheet targets={s.targets} onClose={() => setChoosing(false)} />}
         </>
@@ -62,23 +76,30 @@ export function PreviewButton({
     }
     case "pending":
       return (
-        <button className={`${cls} pending`} disabled>
-          準備中
+        <button className={`btn btn-pending ${size}`} disabled>
+          <span className="dot-pulse" /> 準備中
         </button>
       );
     case "failed":
       return logUrl ? (
-        <button className={`${cls} failed`} onClick={() => openExternal(logUrl)}>
-          失敗・ログ
+        <button
+          className={`btn btn-danger-outline ${size}`}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openExternal(logUrl);
+          }}
+        >
+          デプロイ失敗・ログ
         </button>
       ) : (
-        <button className={`${cls} failed`} disabled>
-          失敗
+        <button className={`btn btn-danger-outline ${size}`} disabled>
+          デプロイ失敗
         </button>
       );
     default:
-      return (
-        <button className={`${cls} ghost`} disabled>
+      return compact ? null : (
+        <button className={`btn ${size}`} disabled>
           プレビューなし
         </button>
       );
@@ -87,26 +108,27 @@ export function PreviewButton({
 
 function ChooseSheet({ targets, onClose }: { targets: PreviewTarget[]; onClose: () => void }) {
   return (
-    <div className="sheet-backdrop" onClick={onClose}>
-      <div className="sheet" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="プレビューを選ぶ">
-        <h2>どのプレビューを開く？</h2>
+    <Sheet title="どのプレビューを開く？" onClose={onClose}>
+      <div className="box">
         {targets.map((t) => (
           <button
             key={t.url}
-            className="btn sheet-item"
+            className="box-row box-row-button"
             onClick={() => {
               openExternal(t.url!);
               onClose();
             }}
           >
-            <span>{t.label}</span>
-            <span className="muted small">{t.source === "deployment" ? "Deployments" : "ボットのコメント"}</span>
+            <div className="grow">
+              <div className="text-bold">{t.label}</div>
+              <div className="fg-muted small">
+                {t.source === "deployment" ? "Deployments" : "ボットのコメント"} · <RelTime iso={t.updatedAt} />
+              </div>
+            </div>
+            <LinkExternalIcon size={16} />
           </button>
         ))}
-        <button className="btn ghost" onClick={onClose}>
-          閉じる
-        </button>
       </div>
-    </div>
+    </Sheet>
   );
 }
